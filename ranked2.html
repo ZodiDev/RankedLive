@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MCSR Ranked Top 50</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #050505; color: #e2e8f0; font-family: 'Inter', sans-serif; }
+        
+        /* Glassmorphism & Animations */
+        .glass { background: rgba(20, 20, 25, 0.8); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.08); }
+        .glass-purple { background: rgba(88, 28, 135, 0.15); border: 1px solid rgba(168, 85, 247, 0.3); }
+        .glass-live { background: linear-gradient(90deg, rgba(69, 10, 10, 0.4) 0%, rgba(20, 20, 25, 0.9) 100%); border: 1px solid rgba(239, 68, 68, 0.5); }
+        
+        /* Hover Effects */
+        .card-hover:hover { transform: translateY(-2px); box-shadow: 0 10px 20px -10px rgba(0,0,0,0.5); }
+        
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #0f172a; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+    </style>
+</head>
+<body class="min-h-screen p-4 md:p-8">
+
+    <div class="max-w-4xl mx-auto">
+        <header class="flex flex-col md:flex-row justify-between items-center mb-8 gap-4">
+            <div>
+                <h1 class="text-4xl font-black text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-cyan-500 tracking-tighter">
+                    MCSR RANKED
+                </h1>
+                <p class="text-slate-500 text-xs font-bold uppercase tracking-[0.2em] mt-1">Live Top 50 Tracker</p>
+            </div>
+            
+            <div id="loading-status" class="flex items-center gap-3 bg-slate-900 px-4 py-2 rounded-full border border-slate-800 shadow-lg">
+                <div class="w-3 h-3 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
+                <span class="text-[10px] font-bold text-slate-400 uppercase">Syncing Leaderboard...</span>
+            </div>
+        </header>
+
+        <div id="progress-container" class="w-full bg-slate-900/50 rounded-full h-1 mb-6 overflow-hidden">
+            <div id="progress-bar" class="bg-emerald-500 h-1 transition-all duration-300 shadow-[0_0_10px_rgba(16,185,129,0.5)]" style="width: 0%"></div>
+        </div>
+
+        <div id="player-grid" class="space-y-3">
+            </div>
+    </div>
+
+    <script>
+        // --- YOUR CREDENTIALS ---
+        const TWITCH_CLIENT_ID = "ctm7kgssic70d4ck6rjch5frhy4ux7"; 
+        const TWITCH_ACCESS_TOKEN = "i1prbq87h8rurto7tacl3iet72gtyq";
+        // ------------------------
+
+        const API_RANKED = "https://api.mcsrranked.com/leaderboard";
+        const API_USER_BASE = "https://api.mcsrranked.com/users/";
+
+        async function init() {
+            updateStatus("Fetching Leaderboard...", 10);
+            
+            try {
+                // 1. Fetch Leaderboard
+                const resp = await fetch(API_RANKED);
+                const json = await resp.json();
+                
+                let rawList = [];
+                if (json.data && Array.isArray(json.data)) rawList = json.data;
+                else if (json.data?.users && Array.isArray(json.data.users)) rawList = json.data.users;
+                
+                if (rawList.length === 0) throw new Error("Leaderboard API empty.");
+
+                // 2. Process Top 50 & ASSIGN RANK HERE
+                // We map them immediately so 'trueRank' is saved before we shuffle the order
+                const top50 = rawList.slice(0, 50).map((p, index) => ({
+                    ...p,
+                    trueRank: index + 1 // Save the actual rank (#1, #2)
+                }));
+
+                updateStatus("Fetching Profiles...", 25);
+
+                // 3. Fetch details (Twitch links)
+                let playersData = await fetchAllProfiles(top50);
+
+                // 4. Check Live Status with your keys
+                updateStatus("Checking Live Status...", 75);
+                playersData = await checkTwitchLiveStatus(playersData);
+
+                // 5. Sort: Live -> Elo
+                // We DO NOT sort by 'hasTwitch' alone, to keep the list cleaner. 
+                // Only LIVE players jump to the top. Everyone else stays in Elo order.
+                playersData.sort((a, b) => {
+                    // Priority 1: Is Live?
+                    if (a.isLive !== b.isLive) return b.isLive - a.isLive;
+                    // Priority 2: Elo (Standard Order)
+                    return b.elo - a.elo;
+                });
+
+                render(playersData);
+                updateStatus("Live Data Active", 100, true);
+
+            } catch (err) {
+                console.error(err);
+                document.getElementById('player-grid').innerHTML = `
+                    <div class="p-8 text-center border border-red-900/50 bg-red-900/10 rounded-xl">
+                        <p class="text-red-400 font-bold mb-2">System Error</p>
+                        <p class="text-xs text-slate-500 font-mono">${err.message}</p>
+                    </div>`;
+            }
+        }
+
+        async function fetchAllProfiles(basicPlayers) {
+            // Helper to fetch one profile
+            const fetchOne = async (player) => {
+                try {
+                    const pResp = await fetch(`${API_USER_BASE}${player.uuid}`);
+                    const pJson = await pResp.json();
+                    const profile = pJson.data || {};
+                    const twitchName = profile.connections?.twitch?.name || profile.connections?.twitch || null;
+                    
+                    return {
+                        rank: player.trueRank, // Keep the rank we saved earlier
+                        uuid: player.uuid,
+                        name: player.nickname,
+                        elo: player.eloRate,
+                        twitch: twitchName,
+                        hasTwitch: !!twitchName,
+                        isLive: false 
+                    };
+                } catch (e) {
+                    return {
+                        rank: player.trueRank,
+                        uuid: player.uuid,
+                        name: player.nickname,
+                        elo: player.eloRate,
+                        twitch: null,
+                        hasTwitch: false,
+                        isLive: false
+                    };
+                }
+            };
+
+            // Run in parallel with progress tracking
+            let completed = 0;
+            const promises = basicPlayers.map(p => fetchOne(p).then(res => {
+                completed++;
+                document.getElementById('progress-bar').style.width = `${25 + ((completed / 50) * 50)}%`;
+                return res;
+            }));
+
+            return Promise.all(promises);
+        }
+
+        async function checkTwitchLiveStatus(players) {
+            const streamers = players.filter(p => p.twitch);
+            if (streamers.length === 0) return players;
+
+            // Twitch allows 100 users per request
+            const query = streamers.map(p => `user_login=${p.twitch}`).join('&');
+            
+            try {
+                const resp = await fetch(`https://api.twitch.tv/helix/streams?${query}`, {
+                    headers: {
+                        'Client-ID': TWITCH_CLIENT_ID,
+                        'Authorization': `Bearer ${TWITCH_ACCESS_TOKEN}`
+                    }
+                });
+                
+                if (!resp.ok) console.warn("Twitch Auth Error", resp.status);
+                
+                const data = await resp.json();
+                const liveStreams = data.data || [];
+                
+                return players.map(p => {
+                    const isLive = liveStreams.some(s => s.user_login.toLowerCase() === p.twitch?.toLowerCase());
+                    return { ...p, isLive };
+                });
+            } catch (e) {
+                console.warn("Live check failed", e);
+                return players;
+            }
+        }
+
+        function render(list) {
+            const container = document.getElementById('player-grid');
+            container.innerHTML = '';
+
+            list.forEach((p) => {
+                // Determine styling based on status
+                let classes = "card-hover flex items-center justify-between p-4 rounded-xl transition-all duration-200 group relative overflow-hidden ";
+                
+                if (p.isLive) {
+                    classes += "glass-live cursor-pointer";
+                } else if (p.hasTwitch) {
+                    classes += "glass cursor-pointer hover:bg-slate-800/80 hover:border-purple-500/30";
+                } else {
+                    classes += "glass cursor-default opacity-80";
+                }
+
+                // If they have Twitch, we make the WHOLE card an <a> tag. 
+                // If not, it's a <div>.
+                const tag = p.hasTwitch ? 'a' : 'div';
+                const href = p.hasTwitch ? `href="https://twitch.tv/${p.twitch}" target="_blank"` : '';
+
+                const html = `
+                <${tag} ${href} class="${classes}">
+                    
+                    <div class="flex items-center gap-5 z-10">
+                        <div class="w-8 text-center">
+                            <span class="font-black text-xl italic ${p.rank <= 3 ? 'text-yellow-400 drop-shadow-md' : 'text-slate-600'}">
+                                #${p.rank}
+                            </span>
+                        </div>
+                        
+                        <div class="relative">
+                            <img src="https://mc-heads.net/avatar/${p.uuid}/48" class="w-12 h-12 rounded-lg shadow-lg bg-slate-900 object-cover">
+                            ${p.isLive ? `
+                                <span class="absolute -top-1.5 -right-1.5 flex h-4 w-4">
+                                    <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                                    <span class="relative inline-flex rounded-full h-4 w-4 bg-red-600 border-2 border-[#0f172a]"></span>
+                                </span>
+                            ` : ''}
+                        </div>
+
+                        <div class="flex flex-col">
+                            <span class="font-bold text-slate-100 text-lg group-hover:text-white transition-colors flex items-center gap-2">
+                                ${p.name}
+                                ${p.isLive ? '<span class="text-[10px] bg-red-600 text-white px-1.5 rounded font-bold tracking-wider animate-pulse">LIVE</span>' : ''}
+                            </span>
+                            ${p.hasTwitch ? 
+                                `<span class="text-xs font-mono font-medium ${p.isLive ? 'text-red-300' : 'text-purple-400 group-hover:text-purple-300'} transition-colors">
+                                    <i class="fab fa-twitch mr-1"></i>${p.twitch}
+                                 </span>` 
+                                : 
+                                `<span class="text-xs text-slate-600 font-mono">No Stream Linked</span>`
+                            }
+                        </div>
+                    </div>
+
+                    <div class="text-right z-10">
+                        <div class="text-2xl font-black text-emerald-400 tracking-tighter group-hover:scale-105 transition-transform origin-right">
+                            ${p.elo}
+                        </div>
+                        <div class="text-[9px] text-slate-500 font-bold uppercase tracking-widest">ELO RATING</div>
+                    </div>
+
+                    ${p.hasTwitch ? `<div class="absolute inset-0 bg-purple-600/5 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>` : ''}
+
+                </${tag}>
+                `;
+                
+                container.insertAdjacentHTML('beforeend', html);
+            });
+        }
+
+        function updateStatus(msg, percent, complete = false) {
+            const bar = document.getElementById('progress-bar');
+            const text = document.querySelector('#loading-status span');
+            const spinner = document.querySelector('#loading-status div');
+            
+            bar.style.width = `${percent}%`;
+            text.innerText = msg;
+            
+            if (complete) {
+                spinner.className = "w-3 h-3 bg-emerald-500 rounded-full shadow-[0_0_10px_#10b981]";
+                setTimeout(() => {
+                    document.getElementById('progress-container').style.opacity = '0';
+                }, 1500);
+            }
+        }
+
+        init();
+    </script>
+</body>
+</html>
