@@ -9,10 +9,10 @@
     <style>
         body { background-color: #050505; color: #e2e8f0; font-family: 'Inter', sans-serif; }
         
-        /* Glassmorphism & Animations */
+        /* Glassmorphism */
         .glass { background: rgba(20, 20, 25, 0.8); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.08); }
-        .glass-purple { background: rgba(88, 28, 135, 0.15); border: 1px solid rgba(168, 85, 247, 0.3); }
         .glass-live { background: linear-gradient(90deg, rgba(69, 10, 10, 0.4) 0%, rgba(20, 20, 25, 0.9) 100%); border: 1px solid rgba(239, 68, 68, 0.5); }
+        .glass-match { background: linear-gradient(90deg, rgba(6, 78, 59, 0.4) 0%, rgba(20, 20, 25, 0.9) 100%); border: 1px solid rgba(52, 211, 153, 0.5); }
         
         /* Hover Effects */
         .card-hover:hover { transform: translateY(-2px); box-shadow: 0 10px 20px -10px rgba(0,0,0,0.5); }
@@ -44,8 +44,7 @@
             <div id="progress-bar" class="bg-emerald-500 h-1 transition-all duration-300 shadow-[0_0_10px_rgba(16,185,129,0.5)]" style="width: 0%"></div>
         </div>
 
-        <div id="player-grid" class="space-y-3">
-            </div>
+        <div id="player-grid" class="space-y-3"></div>
     </div>
 
     <script>
@@ -71,34 +70,33 @@
                 
                 if (rawList.length === 0) throw new Error("Leaderboard API empty.");
 
-                // 2. Process Top 50 & ASSIGN RANK HERE
-                // We map them immediately so 'trueRank' is saved before we shuffle the order
+                // 2. Process Top 50
                 const top50 = rawList.slice(0, 50).map((p, index) => ({
                     ...p,
-                    trueRank: index + 1 // Save the actual rank (#1, #2)
+                    trueRank: index + 1
                 }));
 
-                updateStatus("Fetching Profiles...", 25);
-
-                // 3. Fetch details (Twitch links)
+                // 3. Fetch details AND Match Status
+                updateStatus("Checking Profiles & Matches...", 30);
                 let playersData = await fetchAllProfiles(top50);
 
-                // 4. Check Live Status with your keys
-                updateStatus("Checking Live Status...", 75);
+                // 4. Check Twitch Live Status
+                updateStatus("Checking Streams...", 80);
                 playersData = await checkTwitchLiveStatus(playersData);
 
-                // 5. Sort: Live -> Elo
-                // We DO NOT sort by 'hasTwitch' alone, to keep the list cleaner. 
-                // Only LIVE players jump to the top. Everyone else stays in Elo order.
+                // 5. Sort Priorities:
+                // 1. Is Live on Twitch OR In Match -> Top
+                // 2. Elo -> Descending
                 playersData.sort((a, b) => {
-                    // Priority 1: Is Live?
-                    if (a.isLive !== b.isLive) return b.isLive - a.isLive;
-                    // Priority 2: Elo (Standard Order)
+                    const aActive = a.isLive || a.inMatch;
+                    const bActive = b.isLive || b.inMatch;
+                    
+                    if (aActive !== bActive) return bActive - aActive;
                     return b.elo - a.elo;
                 });
 
                 render(playersData);
-                updateStatus("Live Data Active", 100, true);
+                updateStatus("Data Active", 100, true);
 
             } catch (err) {
                 console.error(err);
@@ -111,24 +109,36 @@
         }
 
         async function fetchAllProfiles(basicPlayers) {
-            // Helper to fetch one profile
+            // Helper to fetch one profile + match status
             const fetchOne = async (player) => {
                 try {
-                    const pResp = await fetch(`${API_USER_BASE}${player.uuid}`);
-                    const pJson = await pResp.json();
+                    // Fetch Profile (Twitch) AND Live Status (Match) in parallel
+                    const [profileResp, matchResp] = await Promise.all([
+                        fetch(`${API_USER_BASE}${player.uuid}`),
+                        fetch(`${API_USER_BASE}${player.uuid}/live`)
+                    ]);
+
+                    const pJson = await profileResp.json();
+                    const mJson = await matchResp.json(); // Match JSON
+
                     const profile = pJson.data || {};
                     const twitchName = profile.connections?.twitch?.name || profile.connections?.twitch || null;
                     
+                    // Check if match API returned success
+                    const inMatch = mJson.status === "success";
+
                     return {
-                        rank: player.trueRank, // Keep the rank we saved earlier
+                        rank: player.trueRank,
                         uuid: player.uuid,
                         name: player.nickname,
                         elo: player.eloRate,
                         twitch: twitchName,
                         hasTwitch: !!twitchName,
-                        isLive: false 
+                        isLive: false,
+                        inMatch: inMatch // New boolean
                     };
                 } catch (e) {
+                    // Fallback
                     return {
                         rank: player.trueRank,
                         uuid: player.uuid,
@@ -136,16 +146,17 @@
                         elo: player.eloRate,
                         twitch: null,
                         hasTwitch: false,
-                        isLive: false
+                        isLive: false,
+                        inMatch: false
                     };
                 }
             };
 
-            // Run in parallel with progress tracking
+            // Run in parallel with progress
             let completed = 0;
             const promises = basicPlayers.map(p => fetchOne(p).then(res => {
                 completed++;
-                document.getElementById('progress-bar').style.width = `${25 + ((completed / 50) * 50)}%`;
+                document.getElementById('progress-bar').style.width = `${30 + ((completed / 50) * 50)}%`;
                 return res;
             }));
 
@@ -156,7 +167,6 @@
             const streamers = players.filter(p => p.twitch);
             if (streamers.length === 0) return players;
 
-            // Twitch allows 100 users per request
             const query = streamers.map(p => `user_login=${p.twitch}`).join('&');
             
             try {
@@ -167,7 +177,7 @@
                     }
                 });
                 
-                if (!resp.ok) console.warn("Twitch Auth Error", resp.status);
+                if (!resp.ok) return players;
                 
                 const data = await resp.json();
                 const liveStreams = data.data || [];
@@ -177,7 +187,6 @@
                     return { ...p, isLive };
                 });
             } catch (e) {
-                console.warn("Live check failed", e);
                 return players;
             }
         }
@@ -187,19 +196,20 @@
             container.innerHTML = '';
 
             list.forEach((p) => {
-                // Determine styling based on status
+                // Dynamic styling
                 let classes = "card-hover flex items-center justify-between p-4 rounded-xl transition-all duration-200 group relative overflow-hidden ";
                 
+                // Prioritize Twitch Live style, fallback to Match style, else standard
                 if (p.isLive) {
                     classes += "glass-live cursor-pointer";
+                } else if (p.inMatch) {
+                    classes += "glass-match cursor-default"; // Green/Cyan tint for match only
                 } else if (p.hasTwitch) {
                     classes += "glass cursor-pointer hover:bg-slate-800/80 hover:border-purple-500/30";
                 } else {
                     classes += "glass cursor-default opacity-80";
                 }
 
-                // If they have Twitch, we make the WHOLE card an <a> tag. 
-                // If not, it's a <div>.
                 const tag = p.hasTwitch ? 'a' : 'div';
                 const href = p.hasTwitch ? `href="https://twitch.tv/${p.twitch}" target="_blank"` : '';
 
@@ -215,6 +225,7 @@
                         
                         <div class="relative">
                             <img src="https://mc-heads.net/avatar/${p.uuid}/48" class="w-12 h-12 rounded-lg shadow-lg bg-slate-900 object-cover">
+                            
                             ${p.isLive ? `
                                 <span class="absolute -top-1.5 -right-1.5 flex h-4 w-4">
                                     <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
@@ -226,8 +237,12 @@
                         <div class="flex flex-col">
                             <span class="font-bold text-slate-100 text-lg group-hover:text-white transition-colors flex items-center gap-2">
                                 ${p.name}
+                                
                                 ${p.isLive ? '<span class="text-[10px] bg-red-600 text-white px-1.5 rounded font-bold tracking-wider animate-pulse">LIVE</span>' : ''}
+                                
+                                ${p.inMatch ? '<span class="text-[10px] bg-cyan-600 text-white px-1.5 rounded font-bold tracking-wider shadow-[0_0_10px_rgba(8,145,178,0.5)]">IN MATCH</span>' : ''}
                             </span>
+
                             ${p.hasTwitch ? 
                                 `<span class="text-xs font-mono font-medium ${p.isLive ? 'text-red-300' : 'text-purple-400 group-hover:text-purple-300'} transition-colors">
                                     <i class="fab fa-twitch mr-1"></i>${p.twitch}
