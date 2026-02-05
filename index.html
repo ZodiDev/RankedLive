@@ -55,29 +55,44 @@
 
         const API_RANKED = "https://api.mcsrranked.com/leaderboard";
         const API_USER_BASE = "https://api.mcsrranked.com/users/";
+        const API_MATCHES_LIVE = "https://api.mcsrranked.com/live";
 
         async function init() {
             updateStatus("Fetching Leaderboard...", 10);
             
             try {
-                // 1. Fetch Leaderboard
-                const resp = await fetch(API_RANKED);
-                const json = await resp.json();
+                // 1. Fetch Leaderboard AND Active Matches Parallel
+                const [lbResp, liveResp] = await Promise.all([
+                    fetch(API_RANKED),
+                    fetch(API_MATCHES_LIVE)
+                ]);
+
+                const lbJson = await lbResp.json();
+                const liveJson = await liveResp.json();
                 
                 let rawList = [];
-                if (json.data && Array.isArray(json.data)) rawList = json.data;
-                else if (json.data?.users && Array.isArray(json.data.users)) rawList = json.data.users;
+                if (lbJson.data && Array.isArray(lbJson.data)) rawList = lbJson.data;
+                else if (lbJson.data?.users && Array.isArray(lbJson.data.users)) rawList = lbJson.data.users;
+                
+                // Process Active Matches
+                const activeUUIDs = new Set();
+                if (liveJson.status === "success" && liveJson.data?.liveMatches) {
+                    liveJson.data.liveMatches.forEach(match => {
+                        match.players.forEach(p => activeUUIDs.add(p.uuid));
+                    });
+                }
                 
                 if (rawList.length === 0) throw new Error("Leaderboard API empty.");
 
                 // 2. Process Top 50
                 const top50 = rawList.slice(0, 50).map((p, index) => ({
                     ...p,
-                    trueRank: index + 1
+                    trueRank: index + 1,
+                    inMatch: activeUUIDs.has(p.uuid) // Set initial match status
                 }));
 
-                // 3. Fetch details AND Match Status
-                updateStatus("Checking Profiles & Matches...", 30);
+                // 3. Fetch details
+                updateStatus("Checking Profiles...", 30);
                 let playersData = await fetchAllProfiles(top50);
 
                 // 4. Check Twitch Live Status
@@ -109,24 +124,15 @@
         }
 
         async function fetchAllProfiles(basicPlayers) {
-            // Helper to fetch one profile + match status
+            // Helper to fetch one profile
             const fetchOne = async (player) => {
                 try {
-                    // Fetch Profile (Twitch) AND Live Status (Match) in parallel
-                    const [profileResp, matchResp] = await Promise.all([
-                        fetch(`${API_USER_BASE}${player.uuid}`),
-                        fetch(`${API_USER_BASE}${player.uuid}/live`)
-                    ]);
-
+                    const profileResp = await fetch(`${API_USER_BASE}${player.uuid}`);
                     const pJson = await profileResp.json();
-                    const mJson = await matchResp.json(); // Match JSON
-
+                    
                     const profile = pJson.data || {};
                     const twitchName = profile.connections?.twitch?.name || profile.connections?.twitch || null;
                     
-                    // Check if match API returned success
-                    const inMatch = mJson.status === "success";
-
                     return {
                         rank: player.trueRank,
                         uuid: player.uuid,
@@ -135,7 +141,7 @@
                         twitch: twitchName,
                         hasTwitch: !!twitchName,
                         isLive: false,
-                        inMatch: inMatch // New boolean
+                        inMatch: player.inMatch // Preserve valid match status
                     };
                 } catch (e) {
                     // Fallback
@@ -147,7 +153,7 @@
                         twitch: null,
                         hasTwitch: false,
                         isLive: false,
-                        inMatch: false
+                        inMatch: player.inMatch
                     };
                 }
             };
@@ -191,6 +197,24 @@
             }
         }
 
+        function openStream(username) {
+            if (!username) return;
+            
+            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+            
+            if (isMobile) {
+                // Try deep link first, fallback handled by OS usually, but we can try to force it
+                window.location.href = `twitch://open?stream=${username}`;
+                
+                // Optional: Fallback to web if app doesn't open (often requires timeout hack, but simpler is better first)
+                setTimeout(() => {
+                    window.open(`https://m.twitch.tv/${username}`, '_blank');
+                }, 500);
+            } else {
+                window.open(`https://twitch.tv/${username}`, '_blank');
+            }
+        }
+
         function render(list) {
             const container = document.getElementById('player-grid');
             container.innerHTML = '';
@@ -210,11 +234,12 @@
                     classes += "glass cursor-default opacity-80";
                 }
 
-                const tag = p.hasTwitch ? 'a' : 'div';
-                const href = p.hasTwitch ? `href="https://twitch.tv/${p.twitch}" target="_blank"` : '';
+                // Change tag based on twitch availability, but handle click manually for streams
+                const tag = p.hasTwitch ? 'div' : 'div';
+                const clickAttr = p.hasTwitch ? `onclick="openStream('${p.twitch}')"` : '';
 
                 const html = `
-                <${tag} ${href} class="${classes}">
+                <${tag} ${clickAttr} class="${classes}">
                     
                     <div class="flex items-center gap-5 z-10">
                         <div class="w-8 text-center">
